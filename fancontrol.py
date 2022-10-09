@@ -33,6 +33,7 @@ import os
 import time
 import subprocess
 import syslog
+import signal
 
 pausetime=10
 ipmiexe="/opt/ipmitool/ipmitool" 
@@ -40,6 +41,9 @@ temp = 0.0
 prevtemp = 0.0
 fanmode = "static"
 logmsg=""
+
+#PIDFILE is only used if you started this via a start service script
+PIDFILE="/var/run/fancontrol.pid"
 #User variable based on your system / CPU
 #Temps are in Celsius
 #To change speed setting, change only the last two digits in hex.
@@ -57,6 +61,9 @@ fanspeed1="0x30 0x30 0x02 0xff 0x14"  # Greater than or equal to temp1
 fanspeed2="0x30 0x30 0x02 0xff 0x1f"  # Greater than or equal to temp2
 fanspeed3="0x30 0x30 0x02 0xff 0x2a"  # Greater than or equal to temp3
 fanspeed4="0x30 0x30 0x02 0xff 0x46"  # Greater than or equal to temp4
+
+
+
 
 
 
@@ -97,6 +104,22 @@ def getcputemp():
             logmsg="Cannot get IPMI temp" 
             syslog.syslog(syslog.LOG_ERR, logmsg)   
     return curtemp
+
+#Found this comon code in several repos for ESXI services
+#It does a gracefull stop / start and handles removing the pid runfile
+def signal_handler(signal_id, frame):
+    logmsg="Single ID - " + str(signal.Signals(signal_id)) + " received"
+    syslog.syslog(syslog.LOG_INFO, logmsg)
+    if signal_id == signal.SIGUSR1:
+        os.remove(PIDFILE)
+        sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGABRT, signal_handler)
+signal.signal(signal.SIGHUP, signal_handler)
+signal.signal(signal.SIGQUIT, signal_handler) 
+signal.signal(signal.SIGUSR1, signal_handler)
+
 
 if __name__ == '__main__':
     logmsg="Starting fan control - Interval of " + str(pausetime)
