@@ -7,7 +7,7 @@ Another Dell IPMI Fan Control Script, 5 settings, both ESXI and Linux hosts
 <br>          TDP (Thermal Design Power) 
 <br>          then subtract about 20-10 degrees C for returntoauto
 <br>          this allows the BIOS to manage high temps
-##        tested on R630 with e5-2697a V4
+<br>          tested on R630 with e5-2697a V4
 
 ## Still in progress - here is what is completed and works
 
