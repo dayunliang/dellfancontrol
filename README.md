@@ -2,14 +2,12 @@
 Another Dell IPMI Fan Control Script, 5 settings, both ESXI and Linux hosts
  
 
-# tested on R630 with e5-2697a V4
-#
-# WARNING - Temp ranges are specific to the TDP of my CPU
-#           Please go to intel ARK for your CPU and check the 
-#           TDP (Thermal Design Power) 
-#           then subtract about 20-10 degrees C for returntoauto
-#           this allows the BIOS to manage high temps
-# tested on R630 with e5-2697a V4
+## WARNING - Temp ranges are specific to the TDP of my CPU
+<br>          Please go to intel ARK for your CPU and check the 
+<br>          TDP (Thermal Design Power) 
+<br>          then subtract about 20-10 degrees C for returntoauto
+<br>          this allows the BIOS to manage high temps
+##        tested on R630 with e5-2697a V4
 
 ## Still in progress - here is what is completed and works
 
