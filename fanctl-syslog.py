@@ -9,8 +9,6 @@
 #           TDP (Thermal Design Power)
 #           then subtract about 15 degrees C for returntoauto
 #
-# Modified form orginal version to use systemd journal
-#
 # fanctl.py
 # start program using fanctlinit.sh
 #     /var/opt/fanctlinit.sh {start|stop|restart|status}
@@ -27,18 +25,16 @@ __versiondate__ = '10/09/2022'
 __maintainer__ = 'gauthig@github'
 __github__ = 'https://github.com/gauthig/dellfanctl'
 __status__ = 'Production'
-__app__ = 'fanctl'
+
 
 import sys
 import re
 import time
 import subprocess
-import logging
 import syslog
-import systemd.journal
 
 pausetime = 10
-ipmiexe = "/usr/bin/ipmitool"
+ipmiexe = "/opt/ipmitool/ipmitool"
 temp = 0.0
 prevtemp = 0.0
 logmsg = ""
@@ -88,9 +84,9 @@ def setfanspeed(setspeed):
     p_status = p.wait()
     logmsg = "Detected threshold change from " + \
         str(prevtemp) + "C to " + str(temp) + "C"
-    log_info_records( logmsg)
-    logmsg = "Set fan speed to " + setspeed[-4:]
-    log_info_records( logmsg)
+    syslog.syslog(syslog.LOG_INFO, logmsg)
+    logmsg = "Set fanspped to " + setspeed[-4:]
+    syslog.syslog(syslog.LOG_INFO, logmsg)
 
 def getcputemp():
     curtemp = 0
@@ -104,32 +100,21 @@ def getcputemp():
     except Exception as ipmierror:
         autofan()
         logmsg = "Cannot get IPMI temp"
-        log_error_records( logmsg)
+        syslog.syslog(syslog.LOG_ERR, logmsg)
     return curtemp
 
-def log_info_records(message):
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__app__)
-    
-    systemd.journal.send(message, SYSLOG_IDENTIFIER='my_app')
-
-def log_error_records(message):
-    logging.basicConfig(level=logging.ERROR)
-    logger = logging.getLogger(__app__)
-    
-    systemd.journal.send(message, SYSLOG_IDENTIFIER='my_app')
 
 if __name__ == '__main__':
     fanmode = "static"
     logmsg = "Starting fan control - Interval of " + str(pausetime)
-    log_info_records( logmsg)
+    syslog.syslog(syslog.LOG_INFO, logmsg)
     while True:
         try:
             temp = getcputemp()
         except Exception as ipmierror:
             autofan()
             logmsg = "Cannot get IPMI temp"
-            log_error_records( logmsg)
+            syslog.syslog(syslog.LOG_ERR, logmsg)
 
         if temp != prevtemp:
             try:
@@ -149,7 +134,7 @@ if __name__ == '__main__':
             except Exception as ipmierror:
                 autofan()
                 logmsg = "Setting fan speed failed"
-                log_error_records( logmsg)
+                syslog.syslog(syslog.LOG_ERR, logmsg)
         prevtemp = temp
         time.sleep(pausetime)
 
