@@ -1,5 +1,6 @@
 # Fan Control program for Dell servers
 Another Dell IPMI Fan Control Script, 5 settings, both ESXI and Linux hosts
+Service scritps for either systemd or SysV
  
 
 ## WARNING - Temp ranges are specific to the TDP of my CPU
@@ -19,7 +20,7 @@ Features
 - [X] Output goes to syslog
 - [X] aded PID file
 - [ ] Temp, ID, Server  and other parms in a json file
-- [ ] init script for systemd 
+- [X] init script for systemd 
 - [X] PEP 8 style guide
 
 ## Requirements
@@ -32,15 +33,32 @@ Features
 ## Usage
 Modify the use paramters in the .py file
 ### Linux
-     /fanctl.py
-or
-    add a cron file using crontab -e
-    @reboot /usr/bin/python3 /home/installeddir/fanctl.py
+     Manualy just run fanctl.py to test (python3 ./fancctl.py)
+Setup as a Service
+<br>
+### Systemd    
+<br>
+<br>DO NOT USE rc.local if your system is systemd, upgrade to current stack
+Install fanctl.service to /etc/systemd/service
+Install fanctl.py /root or anywhere you want to place this script
+If you chagned the install from /root, then update the fanctl.service to correct location
+-Reload the service files to include the new service.
+sudo systemctl daemon-reload
+-Start your service
+sudo systemctl start your-service.service
+-To check the status of your service
+sudo systemctl status example.service
+-To enable your service on every reboot
+sudo systemctl enable example.service
+<br>
+Modify the after section to a servcie you want to start after.  This is setup for Proxmox ()
 <br>
 ### ESXI
 put both esxifanctl.py and fanctlinit.sh int the same directory (maybe /opt/fanctl)
 chmod +x fanctlinit.sh esxifanctl.py
 ./fanctl start
+### SysV - old school
+Install fanctlinit.sh to /etc/rc.local
 
 ## Output of program 
 All output is directed to syslog or syslog.log (esxi)
