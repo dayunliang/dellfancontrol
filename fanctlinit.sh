@@ -6,7 +6,7 @@
 #Version  1.0
 
 PIDFILE="/var/run/fanctl.pid"
-fanctl="/opt/fanctl/fanctl.py"
+fanctl="/opt/fanctl/esxifanctl.py"
 LOGFILE="/var/log/fanctl.log"
 
 log() {
