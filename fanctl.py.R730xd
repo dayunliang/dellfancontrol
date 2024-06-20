@@ -1,6 +1,34 @@
 #!/bin/python
 # -*- coding: utf-8 -*-
 
+# Fan Control program for ESXI only - can be modified for any linux
+# Must pre-install IPMITOOL vib
+# No LANPLUS as doing IPMI on local BMC only
+# When doing LANPLUS and remote servers, any netowrk
+# issue could cause a system to overheat. Run Localy
+#
+# WARNING - Temp ranges are specific to the TDP of my CPU
+#           Please go to intel ARK for your CPU and check the
+#           TDP (Thermal Design Power)
+#           then subtract about 15 degrees C for returntoauto
+#
+# fanctl.py
+# start program using fanctlinit.sh
+#     /var/opt/fanctlinit.sh {start|stop|restart|status}
+
+# Input - none, paramters are embeded in script
+# Output - send all messages to syslog (/var/log/fanctl.log)
+
+__author__ = 'Andy Da'
+__copyright__ = 'Copyright 2022, Garrett Gauthier'
+__credits__ = ['Garrett Gauthier', 'Andy Da']
+__license__ = 'GNU 3.0'
+__version__ = '1.0'
+__versiondate__ = '06/19/2024'
+__maintainer__ = 'gauthig@github'
+__github__ = 'https://github.com/dayunliang/dellfancontrol'
+__status__ = 'Production'
+
 import sys
 import re
 import os
