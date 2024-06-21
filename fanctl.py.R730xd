@@ -1,34 +1,6 @@
 #!/bin/python
 # -*- coding: utf-8 -*-
 
-# Fan Control program for ESXI only - can be modified for any linux
-# Must pre-install IPMITOOL vib
-# No LANPLUS as doing IPMI on local BMC only
-# When doing LANPLUS and remote servers, any netowrk
-# issue could cause a system to overheat. Run Localy
-#
-# WARNING - Temp ranges are specific to the TDP of my CPU
-#           Please go to intel ARK for your CPU and check the
-#           TDP (Thermal Design Power)
-#           then subtract about 15 degrees C for returntoauto
-#
-# fanctl.py
-# start program using fanctlinit.sh
-#     /var/opt/fanctlinit.sh {start|stop|restart|status}
-
-# Input - none, paramters are embeded in script
-# Output - send all messages to syslog (/var/log/fanctl.log)
-
-__author__ = 'Andy Da'
-__copyright__ = 'Copyright 2022, Garrett Gauthier'
-__credits__ = ['Garrett Gauthier', 'Andy Da']
-__license__ = 'GNU 3.0'
-__version__ = '1.0'
-__versiondate__ = '06/19/2024'
-__maintainer__ = 'gauthig@github'
-__github__ = 'https://github.com/dayunliang/dellfancontrol'
-__status__ = 'Production'
-
 import sys
 import re
 import os
@@ -108,7 +80,7 @@ def setfanspeed(fan, setspeed):
     log_message(f"Set fan mode to manual: {result.returncode}, {result.stdout}, {result.stderr}")
 
     result = subprocess.run([ipmiexe] + setspeed, capture_output=True)
-    log_message(f"Set {fan} speed to {setspeed[-1]}: {result.returncode}, {result.stdout}, {result.stderr}")
+    log_message(f"Set {fan} speed to {int(setspeed[-1], 16)}%: {result.returncode}, {result.stdout}, {result.stderr}")
     return
 
 # 获取CPU温度
@@ -119,7 +91,6 @@ def getcputemps():
         ipmiproc = [ipmiexe, "sensor", "list"]
         result = subprocess.run(ipmiproc, capture_output=True)
         output = result.stdout.decode()
-        log_message(f"IPMI sensor list output: {output}")
         
         # 解析IPMI输出以获取温度信息
         lines = output.splitlines()
@@ -172,6 +143,8 @@ if __name__ == '__main__':
     log_message(f"Starting fan control - Interval of {pausetime} seconds")
     set_default_fan_speeds()  # 设置其他风扇的默认速度
     while True:
+        # 在每次循环的开始添加分隔符
+        log_message("="*40)
         try:
             temp1, temp2 = getcputemps()  # 获取CPU温度
         except Exception as ipmierror:
@@ -210,7 +183,7 @@ if __name__ == '__main__':
                             setspeed = fanspeeds[fan][0]  # 设置默认速度，当温度 >= 65°C时
 
                         setfanspeed(fan, setspeed)  # 设置风扇速度
-                        log_message(f"Setting {fan} speed to {setspeed[-1]}")
+                        log_message(f"Setting {fan} speed to {int(setspeed[-1], 16)}%")
                 except Exception as ipmierror:
                     autofan()  # 设定风扇速度失败时切换风扇至自动模式
                     log_message(f"Setting fan speed failed: {ipmierror}")
@@ -220,7 +193,13 @@ if __name__ == '__main__':
             else:
                 prevtemp2 = temp  # 更新CPU2上次温度
         
+        # 记录CPU温度和风扇设定速度的对应关系
+        fan_speed_info = (
+            f"CPU1 Temp: {temp1}C, FAN2 Speed: {int(fanspeeds['FAN2'][min(4, sum(temp1 >= t for t in temp_thresholds))][-1], 16)}%\n"
+            f"CPU2 Temp: {temp2}C, FAN3 Speed: {int(fanspeeds['FAN3'][min(4, sum(temp2 >= t for t in temp_thresholds))][-1], 16)}%"
+        )
+        log_message(f"CPU and Fan Speed Correspondence:\n{fan_speed_info}")
+
         time.sleep(pausetime)  # 暂停一段时间后继续执行
 
     sys.exit()  # 退出
-
