@@ -55,7 +55,7 @@ fanspeeds = {
 
 # 设置日志记录
 logger = logging.getLogger("fanctl")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # 设置日志级别为DEBUG
 handler = RotatingFileHandler(log_file, maxBytes=log_max_bytes, backupCount=log_backup_count)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
@@ -63,8 +63,8 @@ logger.addHandler(handler)
 
 # 记录消息到日志文件和syslog
 def log_message(message):
-    logger.info(message)
-    syslog.syslog(syslog.LOG_INFO, message)
+    logger.debug(message)  # 记录DEBUG级别的日志
+    syslog.syslog(syslog.LOG_DEBUG, message)  # 记录到syslog中
 
 # 切换风扇至自动模式
 def autofan():
