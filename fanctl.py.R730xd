@@ -1,6 +1,59 @@
 #!/bin/python
 # -*- coding: utf-8 -*-
 
+# =============== 可设定的变量部分 ===============
+
+# 可设定的日志分隔符
+log_separator = "=" * 87  # 日志分隔符，用于在日志中分隔不同的消息
+
+# 静态风扇的默认速度
+static_fan_speed = 20  # 默认为20%的风扇速度
+
+# 脚本运行控制
+pausetime = 10  # 每次循环的暂停时间，单位为秒
+
+# IPMI工具路径
+ipmiexe = "/vmfs/volumes/datastore1/opt/ipmitool/ipmitool"  # IPMI工具的路径，用于风扇和温度管理
+
+# 风扇控制参数
+fanmode = "manual"  # 初始风扇模式，"manual" 表示手动模式
+
+# 日志设置
+log_file = "/var/log/fanctl.log"  # 主日志文件的路径
+mode_change_log_file = "/var/log/fanctl_mode_change.log"  # 记录风扇模式改变的日志文件路径
+log_max_bytes = 5 * 1024 * 1024  # 日志文件的最大大小，设置为5MB
+log_backup_count = 3  # 保留的备份日志文件的数量
+
+# 风扇速度控制阈值
+returntoauto = 65.0  # 当CPU温度高于56°C时，切换回自动风扇模式
+manual_threshold = 60.0  # 当CPU温度低于53°C时，切换为手动风扇模式
+temp_thresholds = [45.0, 50.0, 55.0, 60.0, 65.0]  # CPU温度阈值，用于设置不同风扇速度
+
+# 动态风扇速度设置（百分比）
+fanspeeds = {
+    "FAN2": [10, 15, 20, 25, 30],  # FAN2 速度设置
+    "FAN3": [10, 15, 20, 25, 30]   # FAN3 速度设置
+}
+
+# 模式切换控制参数
+mode_switch_interval = 15  # 定义模式切换的间隔时间，单位为分钟
+max_switch_count = 2  # 在 mode_switch_interval 时间内允许的最大模式切换次数
+fan_speed_high = 30  # 频繁切换时静态风扇的高速度 (百分比)
+reset_fan_speed_interval = 30  # 静态风扇重置为默认速度的时间间隔，单位为分钟
+
+# 风扇分类
+static_fans = ["FAN0", "FAN1", "FAN4", "FAN5"]  # 静态风扇列表
+dynamic_fans = ["FAN2", "FAN3"]  # 动态风扇列表
+
+# IPMI命令设置
+fanauto = ["raw", "0x30", "0x30", "0x01", "0x01"]  # 切换到自动模式的 IPMI 命令
+fanmanual = ["raw", "0x30", "0x30", "0x01", "0x00"]  # 切换到手动模式的 IPMI 命令
+
+# PID文件路径
+PIDFILE = "/var/run/fanctl.pid"  # PID 文件的路径，用于进程管理
+
+# =============== 脚本核心逻辑开始 ===============
+
 import sys
 import re
 import os
@@ -10,64 +63,35 @@ import syslog
 import signal
 import logging
 from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
 
-# 脚本参数和路径设置
-pausetime = 10  # 循环暂停时间（秒）
-ipmiexe = "/vmfs/volumes/datastore3/opt/ipmitool/ipmitool"  # IPMI工具路径
-temp1 = 0.0  # CPU1温度
-temp2 = 0.0  # CPU2温度
-prevtemp1 = 0.0  # 上一次记录的CPU1温度
-prevtemp2 = 0.0  # 上一次记录的CPU2温度
-fanmode = "static"  # 风扇模式，默认静态模式
+# =============== 日志系统设置 ===============
 
-log_file = "/var/log/fanctl.log"  # 主日志文件路径
-mode_change_log_file = "/var/log/fanctl_mode_change.log"  # 风扇模式改变日志文件路径
-log_max_bytes = 5 * 1024 * 1024  # 日志文件大小（5 MB）
-log_backup_count = 3  # 保留的备份日志文件数量
-PIDFILE = "/var/run/fanctl.pid"  # PID文件路径
+class CustomFormatter(logging.Formatter):
+    """Custom Formatter to manually apply UTC+8 timezone offset"""
+    def formatTime(self, record, datefmt=None):
+        # Get the current UTC time and add the 8-hour offset for UTC+8
+        local_time = datetime.utcfromtimestamp(record.created) + timedelta(hours=8)
+        if datefmt:
+            s = local_time.strftime(datefmt)
+        else:
+            # Change to a more traditional format without the 'T'
+            s = local_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+        return s
 
-# IPMI命令
-fanauto = ["raw", "0x30", "0x30", "0x01", "0x01"]  # 切换至自动风扇模式的IPMI命令
-fanmanual = ["raw", "0x30", "0x30", "0x01", "0x00"]  # 切换至手动/静态风扇模式的IPMI命令
-returntoauto = 65.0  # 当CPU温度高于等于此值时，切换回自动风扇模式
-manual_threshold = 60.0  # 当所有CPU温度低于此值时，切换为手动风扇模式
-temp_thresholds = [45.0, 50.0, 55.0, 60.0, 65.0]  # CPU温度阈值，对应不同风扇速度设定点
-
-# 风扇速度设置表，根据不同温度设定不同风扇速度
-fanspeeds = {
-    "FAN2": [
-        ["raw", "0x30", "0x30", "0x02", "0x02", "0x0a"],   # 默认速度 10%
-        ["raw", "0x30", "0x30", "0x02", "0x02", "0x0f"],   # 大于等于temp1时 15%
-        ["raw", "0x30", "0x30", "0x02", "0x02", "0x14"],   # 大于等于temp2时 20%
-        ["raw", "0x30", "0x30", "0x02", "0x02", "0x19"],   # 大于等于temp3时 25%
-        ["raw", "0x30", "0x30", "0x02", "0x02", "0x1e"]    # 大于等于temp4时 30%
-    ],
-    "FAN3": [
-        ["raw", "0x30", "0x30", "0x02", "0x03", "0x0a"],   # 默认速度 10%
-        ["raw", "0x30", "0x30", "0x02", "0x03", "0x0f"],   # 大于等于temp1时 15%
-        ["raw", "0x30", "0x30", "0x02", "0x03", "0x14"],   # 大于等于temp2时 20%
-        ["raw", "0x30", "0x30", "0x02", "0x03", "0x19"],   # 大于等于temp3时 25%
-        ["raw", "0x30", "0x30", "0x02", "0x03", "0x1e"]    # 大于等于temp4时 30%
-    ],
-    "FAN0": [["raw", "0x30", "0x30", "0x02", "0x00", "0x0a"]],   # 默认速度 10%
-    "FAN1": [["raw", "0x30", "0x30", "0x02", "0x01", "0x0a"]],
-    "FAN4": [["raw", "0x30", "0x30", "0x02", "0x04", "0x0a"]],
-    "FAN5": [["raw", "0x30", "0x30", "0x02", "0x05", "0x0a"]]
-}
-
-# 设置主日志记录
+# 设置主日志记录器
 logger = logging.getLogger("fanctl")
-logger.setLevel(logging.DEBUG)  # 设置日志级别为DEBUG
+logger.setLevel(logging.DEBUG)  # 设置日志级别为DEBUG，记录所有消息
 handler = RotatingFileHandler(log_file, maxBytes=log_max_bytes, backupCount=log_backup_count)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+formatter = CustomFormatter('%(asctime)s - %(levelname)s - %(message)s')  # 使用自定义格式化器
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-# 设置风扇模式改变日志记录
+# 设置风扇模式改变的日志记录器
 mode_change_logger = logging.getLogger("fanctl_mode_change")
-mode_change_logger.setLevel(logging.DEBUG)  # 设置日志级别为DEBUG
+mode_change_logger.setLevel(logging.DEBUG)
 
-# 在脚本启动时清空风扇模式改变日志文件内容
+# 在脚本启动时，清空风扇模式改变日志的内容
 with open(mode_change_log_file, 'w'):
     pass
 
@@ -75,82 +99,232 @@ mode_change_handler = RotatingFileHandler(mode_change_log_file, maxBytes=log_max
 mode_change_handler.setFormatter(formatter)
 mode_change_logger.addHandler(mode_change_handler)
 
-last_logged_time = None
+# =============== 变量初始化 ===============
+last_logged_time = None  # 记录上一次日志的时间
+mode_switch_timestamps = []  # 记录风扇模式切换的时间戳
 
-# 记录消息到主日志文件和syslog
+# =============== 日志记录函数 ===============
 def log_message(message):
-    logger.debug(message)  # 记录DEBUG级别的日志
-    syslog.syslog(syslog.LOG_DEBUG, message)  # 记录到syslog中
+    """
+    记录消息到主日志文件并同步到系统日志。
+    """
+    logger.debug(message)  # 将消息记录到主日志
+    syslog.syslog(syslog.LOG_DEBUG, message)  # 记录到系统syslog
 
-# 记录风扇模式改变信息到单独的日志文件
 def log_mode_change_message(message, add_separator=True):
+    """
+    记录风扇模式改变信息到专用日志文件。
+    """
     global last_logged_time
     current_time = time.strftime('%Y-%m-%d %H:%M:%S')
 
     if add_separator and (last_logged_time is None or last_logged_time != current_time):
-        mode_change_logger.debug("="*80)  # 添加分隔符
+        mode_change_logger.debug(log_separator)  # 在日志中添加分隔符
 
-    mode_change_logger.debug(f"{current_time} - {message}")  # 记录风扇模式改变信息到单独的日志文件
+    mode_change_logger.debug(f"{current_time} - {message}")  # 记录风扇模式改变信息
     last_logged_time = current_time
 
-# 切换风扇至自动模式
+# =============== 风扇模式切换函数 ===============
 def autofan():
-    subprocess.run([ipmiexe] + fanauto, capture_output=True)
-    log_message("Set fans to auto mode")
-    log_mode_change_message("Set fans to auto mode")
-    return
+    """
+    切换风扇至自动模式，并记录模式切换的时间戳。
+    """
+    try:
+        subprocess.run([ipmiexe] + fanauto, capture_output=True)
+        log_message("Set fans to auto mode")  # 记录切换到自动模式的日志
+        log_mode_change_message("Set fans to auto mode")  # 记录模式改变
+        mode_switch_timestamps.append(datetime.now())  # 记录切换时间戳
+        mode_switch_timestamps[:] = [timestamp for timestamp in mode_switch_timestamps if timestamp > datetime.now() - timedelta(minutes=mode_switch_interval)]
+    except Exception as e:
+        log_message(f"Failed to set fans to auto mode: {e}")  # 如果命令失败，记录错误
 
-# 设置指定风扇的速度
-def setfanspeed(fan, setspeed):
-    subprocess.run([ipmiexe] + setspeed, capture_output=True)
-    log_message(f"Set {fan} speed to {int(setspeed[-1], 16)}%")
-    return
+def manualfan():
+    """
+    切换风扇至手动模式。
+    """
+    try:
+        subprocess.run([ipmiexe] + fanmanual, capture_output=True)
+        log_message("Set fans to manual mode")  # 记录切换到手动模式的日志
+        log_mode_change_message("Set fans to manual mode")  # 记录模式改变
+    except Exception as e:
+        log_message(f"Failed to set fans to manual mode: {e}")  # 如果命令失败，记录错误
 
-# 获取CPU温度
+# =============== 获取风扇速度函数 ===============
+def get_current_fan_speed(fan):
+    """
+    获取指定风扇的当前速度，结果以百分比形式返回。
+    """
+    try:
+        command = [ipmiexe, "sensor", "list"]  # 使用 IPMI 工具列出传感器信息
+        result = subprocess.run(command, capture_output=True)
+        output = result.stdout.decode()
+
+        # 定义每个风扇的最大和最小RPM值
+        fan_max_rpm = {
+            "FAN0": 16920,  # 对应IPMI中的Fan1
+            "FAN1": 16920,  # 对应IPMI中的Fan2
+            "FAN2": 16920,  # 对应IPMI中的Fan3
+            "FAN3": 16920,  # 对应IPMI中的Fan4
+            "FAN4": 16920,  # 对应IPMI中的Fan5
+            "FAN5": 16920   # 对应IPMI中的Fan6
+        }
+        min_rpm = 360  # 所有风扇的最小RPM设为360
+
+        # IPMI 中风扇的名称与脚本中的风扇名称的映射
+        ipmi_fan_mapping = {
+            "FAN0": "Fan1",  # FAN0 对应 IPMI Fan1
+            "FAN1": "Fan2",  # FAN1 对应 IPMI Fan2
+            "FAN2": "Fan3",  # FAN2 对应 IPMI Fan3
+            "FAN3": "Fan4",  # FAN3 对应 IPMI Fan4
+            "FAN4": "Fan5",  # FAN4 对应 IPMI Fan5
+            "FAN5": "Fan6"   # FAN5 对应 IPMI Fan6
+        }
+
+        # 解析风扇的 RPM 值
+        lines = output.splitlines()
+        ipmi_fan_name = ipmi_fan_mapping.get(fan)  # 获取对应的 IPMI 风扇名称
+        for line in lines:
+            if ipmi_fan_name in line:
+                # 匹配类似 "Fan3 RPM | 16920.000  | RPM" 的行，提取 RPM 值
+                match = re.search(rf'{ipmi_fan_name}\s*RPM\s*\|\s*([\d\.]+)\s*\|\s*RPM', line)
+                if match:
+                    rpm = float(match.group(1))
+                    max_rpm = fan_max_rpm.get(fan, 16920)  # 获取对应的最大 RPM
+                    # 计算风扇速度百分比
+                    fan_speed_percent = int(((rpm - min_rpm) / (max_rpm - min_rpm)) * 100)
+                    fan_speed_percent = max(0, min(fan_speed_percent, 100))  # 限制风扇速度在0-100%之间
+                    return fan_speed_percent
+    except Exception as e:
+        log_message(f"Failed to get current speed for {fan}: {e}")
+    return 0  # 如果获取失败，返回0作为默认值
+
+# =============== 设置风扇速度函数 ===============
+def setfanspeed(fan, speed_percent):
+    """
+    将指定风扇的速度设置为给定的百分比。
+    """
+    hex_speed = format(int(speed_percent), '02x')  # 将百分比转换为十六进制数值
+    try:
+        command = ["raw", "0x30", "0x30", "0x02", fan[-1], f"0x{hex_speed}"]  # 发送 IPMI 命令
+        result = subprocess.run([ipmiexe] + command, capture_output=True)
+        if result.returncode == 0:
+            log_message(f"Set {fan} speed to {speed_percent}% successfully")
+        else:
+            log_message(f"Failed to set {fan} speed to {speed_percent}%")
+    except Exception as e:
+        log_message(f"Failed to set {fan} speed: {e}")
+
+# =============== 获取CPU温度函数 ===============
 def getcputemps():
+    """
+    获取CPU1和CPU2的当前温度。
+    """
     temps = [0.0, 0.0]
     try:
-        # 使用IPMI工具获取CPU温度
-        ipmiproc = [ipmiexe, "sensor", "list"]
+        ipmiproc = [ipmiexe, "sensor", "list"]  # 使用IPMI列出传感器信息
         result = subprocess.run(ipmiproc, capture_output=True)
         output = result.stdout.decode()
 
-        # 解析IPMI输出以获取温度信息
+        # 从输出中提取温度信息
         lines = output.splitlines()
         if len(lines) > 16:
-            temp1_line = lines[14]
-            temp2_line = lines[15]
+            temp1_line = lines[14]  # CPU1温度所在行
+            temp2_line = lines[15]  # CPU2温度所在行
 
-            match_temp1 = re.search(r'(\d+\.\d+)', temp1_line)
-            match_temp2 = re.search(r'(\d+\.\d+)', temp2_line)
+            match_temp1 = re.search(r'(\d+\.\d+)', temp1_line)  # 提取CPU1温度
+            match_temp2 = re.search(r'(\d+\.\d+)', temp2_line)  # 提取CPU2温度
 
             if match_temp1:
                 temps[0] = float(match_temp1.group(1))
             if match_temp2:
                 temps[1] = float(match_temp2.group(1))
 
-        log_message(f"CPU1 Temp: {temps[0]}C, CPU2 Temp: {temps[1]}C")
+        log_message(f"CPU1 Temp: {temps[0]}C, CPU2 Temp: {temps[1]}C")  # 记录当前温度
     except Exception as ipmierror:
-        # 发生异常时，切换风扇至自动模式并记录错误日志
-        autofan()
+        autofan()  # 如果获取温度失败，切换至自动模式
         log_message(f"Cannot get IPMI temps: {ipmierror}")
         syslog.syslog(syslog.LOG_ERR, str(ipmierror))
     return temps
 
-# 设置所有风扇的默认速度
-def set_default_fan_speeds():
-    for fan in ["FAN0", "FAN1", "FAN4", "FAN5", "FAN2", "FAN3"]:
+# =============== 设置静态风扇速度函数 ===============
+def set_static_fan_speeds():
+    """
+    根据模式切换次数和时间间隔，设置所有静态风扇的速度。
+    """
+    now = datetime.now()
+    speed = static_fan_speed  # 默认静态风扇的速度
+
+    # 获取最近 mode_switch_interval 分钟内的切换记录
+    recent_auto_switches = [timestamp for timestamp in mode_switch_timestamps if now - timestamp <= timedelta(minutes=mode_switch_interval)]
+    
+    # 获取最近 mode_switch_interval/2 分钟内的频繁切换记录
+    very_recent_auto_switches = [timestamp for timestamp in mode_switch_timestamps if now - timestamp <= timedelta(minutes=mode_switch_interval / 2)]
+
+    if len(very_recent_auto_switches) >= max_switch_count:  # 如果发生了频繁模式切换
+        speed = fan_speed_high  # 设置高速度
+        log_message(f"Frequent mode switches detected. Setting static fan speed to {fan_speed_high}%")
+    elif mode_switch_timestamps:
+        last_switch_time = mode_switch_timestamps[-1]  # 获取最近一次切换的时间
+        if now - last_switch_time > timedelta(minutes=reset_fan_speed_interval):  # 如果超过了重置时间间隔
+            speed = static_fan_speed  # 重置风扇速度
+            log_message(f"No mode switch detected in the last {reset_fan_speed_interval} minutes. Resetting static fan speed to {static_fan_speed}%")
+
+    # 设置静态风扇的速度，并记录当前速度
+    for fan in static_fans:
         try:
-            setfanspeed(fan, fanspeeds[fan][0])
+            current_speed = get_current_fan_speed(fan)  # 获取当前风扇速度
+            log_message(f"{fan} current static fan speed: {current_speed}%")  # 记录当前静态风扇速度
+            if fanmode == "manual":  # 仅在手动模式下设置静态风扇的速度
+                setfanspeed(fan, speed)  # 设置风扇的速度
+                log_message(f"Setting {fan} to {speed}%")  # 记录设置的静态风扇速度
         except Exception as ipmierror:
             log_message(f"Setting {fan} speed failed: {ipmierror}")
             syslog.syslog(syslog.LOG_ERR, str(ipmierror))
 
-# 信号处理函数
+# =============== 调整动态风扇的函数 ===============
+def adjust_dynamic_fans(temp1, temp2):
+    """
+    根据CPU温度动态调整 FAN2 和 FAN3 的速度。
+    如果在自动模式下，只显示当前 FAN2 和 FAN3 的风扇速度，而不显示设定速度。
+    """
+    for i, (temp, fan) in enumerate(zip([temp1, temp2], dynamic_fans)):
+        log_message(f"Processing {fan} with current temp: {temp}C")
+        
+        if fanmode == "auto":  # 自动模式下仅显示当前风扇速度
+            current_fan_speed = get_current_fan_speed(fan)
+            log_message(f"{fan} is in auto mode, current fan speed: {current_fan_speed}%")
+        else:  # 手动模式下根据温度调整风扇速度
+            try:
+                # 根据不同温度区间设置风扇速度
+                if temp < temp_thresholds[0]:  # 低于45°C
+                    setspeed = fanspeeds[fan][0]  # 设置为10%
+                elif temp >= temp_thresholds[0] and temp < temp_thresholds[1]:  # 45°C ≤ temp < 50°C
+                    setspeed = fanspeeds[fan][1]  # 设置为15%
+                elif temp >= temp_thresholds[1] and temp < temp_thresholds[2]:  # 50°C ≤ temp < 55°C
+                    setspeed = fanspeeds[fan][2]  # 设置为20%
+                elif temp >= temp_thresholds[2] and temp < temp_thresholds[3]:  # 55°C ≤ temp < 60°C
+                    setspeed = fanspeeds[fan][3]  # 设置为25%
+                elif temp >= temp_thresholds[3] and temp < temp_thresholds[4]:  # 60°C ≤ temp < 65°C
+                    setspeed = fanspeeds[fan][4]  # 设置为30%
+                elif temp >= temp_thresholds[4]:  # 如果温度高于65°C
+                    autofan()  # 切换到自动模式，确保散热
+                    log_message(f"CPU temp too high, switching {fan} to auto mode")
+                    continue
+
+                # 手动模式下设置动态风扇的速度
+                setfanspeed(fan, setspeed)
+                log_message(f"Setting {fan} speed to {setspeed}%")
+            except Exception as e:
+                log_message(f"Failed to adjust speed for {fan}: {e}")
+
+# =============== 信号处理函数 ===============
 def signal_handler(signal_id, frame):
+    """
+    信号处理函数，用于处理系统信号并进行安全退出。
+    """
     log_message(f"Signal {signal.Signals(signal_id).name} received")
     if signal_id == signal.SIGUSR1:
-        os.remove(PIDFILE)  # 删除PID文件
+        os.remove(PIDFILE)
         sys.exit(0)
 
 # 注册信号处理函数
@@ -160,78 +334,55 @@ signal.signal(signal.SIGHUP, signal_handler)
 signal.signal(signal.SIGQUIT, signal_handler)
 signal.signal(signal.SIGUSR1, signal_handler)
 
-# 主程序入口
+# =============== 主程序入口 ===============
 if __name__ == '__main__':
-    log_message(f"Starting fan control script - Interval: {pausetime} seconds")
-    set_default_fan_speeds()  # 设置所有风扇的默认速度
-    log_mode_change_message("Script started, initializing all fan speeds to default values")
-
-    while True:
-        # 在每次循环的开始添加分隔符
-        log_message("="*80)
-        try:
-            temp1, temp2 = getcputemps()  # 获取CPU温度
-        except Exception as ipmierror:
-            autofan()  # 获取温度异常时切换风扇至自动模式
-            log_message("Error getting IPMI temps, switching fans to auto mode")
-            temp1 = prevtemp1
-            temp2 = prevtemp2
-
-        # 检查是否需要将风扇模式切换回手动模式
-        if temp1 < manual_threshold and temp2 < manual_threshold and fanmode == "auto":
-            subprocess.run([ipmiexe] + fanmanual, capture_output=True)
-            fanmode = "static"
-            log_mode_change_message(f"Switching to manual mode, CPU1 Temp: {temp1}C, CPU2 Temp: {temp2}C")
-
-            # 设置所有风扇的速度为默认速度
-            set_default_fan_speeds()
-
-        # 处理每个风扇的温度和速度设定逻辑
-        for i, (temp, prevtemp, fan) in enumerate(zip([temp1, temp2], [prevtemp1, prevtemp2], ["FAN2", "FAN3"])):
-            log_message(f"Processing {fan} with current temp: {temp}C, previous temp: {prevtemp}C")
-            log_message(f"Current fan mode: {fanmode}, Temperature thresholds: {temp_thresholds}")
-            if temp != prevtemp:
-                try:
-                    if temp >= returntoauto and fanmode == "static":
-                        autofan()
-                        fanmode = "auto"
-                        log_mode_change_message(f"Switching to auto mode, CPU Temp: {temp}C")
-                    else:
-                        # 根据温度阈值设置风扇速度
-                        if temp < temp_thresholds[0]:
-                            setspeed = fanspeeds[fan][0]
-                        elif temp >= temp_thresholds[0] and temp < temp_thresholds[1]:
-                            setspeed = fanspeeds[fan][1]
-                        elif temp >= temp_thresholds[1] and temp < temp_thresholds[2]:
-                            setspeed = fanspeeds[fan][2]
-                        elif temp >= temp_thresholds[2] and temp < temp_thresholds[3]:
-                            setspeed = fanspeeds[fan][3]
-                        elif temp >= temp_thresholds[3] and temp < temp_thresholds[4]:
-                            setspeed = fanspeeds[fan][4]
-                        elif temp >= temp_thresholds[4]:
-                            autofan()
-                            fanmode = "auto"
-                            log_mode_change_message(f"Switching to auto mode, CPU Temp: {temp}C")
-                            setspeed = fanspeeds[fan][0]  # 设置默认速度，当温度 >= 65°C时
-
-                        setfanspeed(fan, setspeed)  # 设置风扇速度
-                        log_message(f"Setting {fan} speed to {int(setspeed[-1], 16)}%")
-                except Exception as ipmierror:
-                    autofan()  # 设定风扇速度失败时切换风扇至自动模式
-                    log_message(f"Setting {fan} speed failed: {ipmierror}")
-                    syslog.syslog(syslog.LOG_ERR, str(ipmierror))
-            if i == 0:
-                prevtemp1 = temp  # 更新CPU1上次温度
-            else:
-                prevtemp2 = temp  # 更新CPU2上次温度
+    try:
+        log_message(log_separator)  # 记录日志分隔符
+        log_message(f"Starting fan control script - Interval: {pausetime} seconds")
         
-        # 记录CPU温度和风扇设定速度的对应关系
-        fan_speed_info = (
-            f"CPU1 Temp: {temp1}C, FAN2 Speed: {int(fanspeeds['FAN2'][min(4, sum(temp1 >= t for t in temp_thresholds))][-1], 16)}%\n"
-            f"CPU2 Temp: {temp2}C, FAN3 Speed: {int(fanspeeds['FAN3'][min(4, sum(temp2 >= t for t in temp_thresholds))][-1], 16)}%"
-        )
-        log_message(f"CPU and Fan Speed Correspondence:\n{fan_speed_info}")
+        # 初始化时强制切换至手动模式，并设置静态风扇的默认速度
+        manualfan()
+        set_static_fan_speeds()  # 设置静态风扇速度
+        log_mode_change_message("Script started, initializing all fan speeds to default values")
+        log_message(log_separator)  # 记录日志分隔符
 
-        time.sleep(pausetime)  # 暂停一段时间后继续执行
+        # 主循环：每次循环根据温度和模式调整风扇速度
+        while True:
+            try:
+                temp1, temp2 = getcputemps()  # 获取CPU温度
+            except Exception as ipmierror:
+                autofan()  # 如果获取温度失败，切换风扇至自动模式
+                log_message("Error getting IPMI temps, switching fans to auto mode")
+                temp1 = prevtemp1
+                temp2 = prevtemp2
 
-    sys.exit()  # 退出程序
+            # 如果温度高于阈值，并且当前风扇处于手动模式，则切换回自动模式
+            log_message(f"Fan mode: {fanmode}, temp1: {temp1}, temp2: {temp2}, manual_threshold: {manual_threshold}, returntoauto: {returntoauto}")
+            
+            if temp1 >= returntoauto or temp2 >= returntoauto:
+                autofan()  # 切换到自动模式
+                fanmode = "auto"
+                log_mode_change_message(f"Switching to auto mode, CPU1 Temp: {temp1}C, CPU2 Temp: {temp2}C")
+
+            # 如果温度低于阈值，并且当前风扇处于自动模式，则切换回手动模式
+            if temp1 < manual_threshold and temp2 < manual_threshold and fanmode == "auto":
+                manualfan()
+                fanmode = "manual"
+                log_mode_change_message(f"Switching to manual mode, CPU1 Temp: {temp1}C, CPU2 Temp: {temp2}C")
+                set_static_fan_speeds()  # 重新设置静态风扇速度
+                log_message("Set all static fans to default speeds in manual mode")
+
+            # 根据温度动态调整动态风扇的速度
+            adjust_dynamic_fans(temp1, temp2)
+
+            # 每个周期查看静态风扇的风速状态
+            set_static_fan_speeds()
+
+            log_message(log_separator)  # 每个周期结束记录日志分隔符
+            time.sleep(pausetime)  # 每次循环暂停指定的秒数
+
+    except Exception as e:
+        log_message(f"Script terminated due to an error: {e}")
+        sys.exit(1)
+
+    sys.exit()
