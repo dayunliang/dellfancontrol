@@ -27,7 +27,7 @@ logger.addHandler(handler)
 
 # 全局变量设置
 pausetime = 10  # 循环暂停时间（秒）
-ipmiexe = "/vmfs/volumes/datastore1/opt/ipmitool/ipmitool"  # IPMI工具路径
+ipmiexe = "/vmfs/volumes/datastore3/opt/ipmitool/ipmitool"  # IPMI工具路径，需要根据实际情况修改
 temp = 0.0  # 当前CPU温度
 prevtemp = 0.0  # 上一次记录的CPU温度
 fanmode = "static"  # 风扇模式，默认为静态
@@ -35,14 +35,24 @@ logmsg = ""  # 日志消息
 
 PIDFILE = "/var/run/fanctl.pid"  # PID文件路径
 # IPMI命令 - 切换至自动风扇模式
-fanauto = ["0x30", "0x30", "0x01", "0x01"]  
+fanauto = ["0x30", "0x30", "0x01", "0x01"]
 # IPMI命令 - 切换至手动/静态风扇模式
-fanmanual = ["0x30", "0x30", "0x01", "0x00"]  
-returntoauto = 65.0  # 当CPU温度高于等于此值时，切换回自动风扇模式
+fanmanual = ["0x30", "0x30", "0x01", "0x00"]
+
+# 温度阈值设置
+temp_threshold_auto = 70.0    # 当CPU温度高于等于此值时，切换到自动风扇模式
+temp_threshold_manual = 60.0  # 当CPU温度低于等于此值时，切换回手动风扇模式
+
+# 确保自动模式阈值高于手动模式阈值
+if temp_threshold_auto <= temp_threshold_manual:
+    raise ValueError("temp_threshold_auto must be greater than temp_threshold_manual")
+
+# 风扇速度温度阈值
 temp1 = 40.0  # 温度阈值1
 temp2 = 45.0  # 温度阈值2
 temp3 = 50.0  # 温度阈值3
 temp4 = 55.0  # 温度阈值4
+
 # 风扇速度设置（以十六进制表示的百分比）
 fanspeed0 = ["0x30", "0x30", "0x02", "0xff", "0x19"]  # 25%
 fanspeed1 = ["0x30", "0x30", "0x02", "0xff", "0x1c"]  # 28%
@@ -51,15 +61,20 @@ fanspeed3 = ["0x30", "0x30", "0x02", "0xff", "0x23"]  # 35%
 fanspeed4 = ["0x30", "0x30", "0x02", "0xff", "0x28"]  # 40%
 
 current_fanspeed = None  # 当前风扇速度
+fanmode_changed = False  # 风扇模式是否发生变化
 
 # 切换风扇至自动模式
 def autofan():
-    global fanmode
+    global fanmode, fanmode_changed, current_fanspeed
     rawtxt = ["raw"] + fanauto
-    result = subprocess.run([ipmiexe] + rawtxt, capture_output=True)
-    fanmode = "auto"
-    logger.info(f"Switched to auto fan mode: {result}")
-    return
+    try:
+        subprocess.run([ipmiexe] + rawtxt, check=True, capture_output=True)
+        fanmode = "auto"
+        fanmode_changed = True  # 标记风扇模式已变化
+        current_fanspeed = None  # 重置风扇速度记录
+        logger.info("Switched to auto fan mode")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to switch to auto fan mode: {e}")
 
 # 设置风扇速度
 def setfanspeed(setspeed):
@@ -67,24 +82,25 @@ def setfanspeed(setspeed):
     speed_percentage = int(setspeed[-1], 16)  # 将风扇速度从十六进制转换为整数表示的百分比
     if current_fanspeed != speed_percentage:  # 如果当前速度与目标速度不同，则设置新速度
         try:
-            ipmiproc = [ipmiexe, "raw"] + setspeed
-            subprocess.run(ipmiproc, check=True, capture_output=True)
+            subprocess.run([ipmiexe, "raw"] + setspeed, check=True, capture_output=True)
             current_fanspeed = speed_percentage
-            logger.info(f"Set fan speed to {speed_percentage}% (from {prevtemp}C to {temp}C)")
+            logger.info(f"Fan speed set to {speed_percentage}%")
         except subprocess.CalledProcessError as e:
             autofan()  # 设置失败时切换至自动模式
             logger.error(f"Setting fan speed failed: {e}")
 
 # 启用手动风扇模式
 def enable_manual_mode():
-    global fanmode
+    global fanmode, fanmode_changed, current_fanspeed
+    rawtxt = ["raw"] + fanmanual
     try:
-        ipmiproc = [ipmiexe, "raw"] + fanmanual
-        subprocess.run(ipmiproc, check=True, capture_output=True)
+        subprocess.run([ipmiexe] + rawtxt, check=True, capture_output=True)
         fanmode = "static"
-        logger.debug(f"Manual fan mode enabled: {ipmiproc}")
+        fanmode_changed = True  # 标记风扇模式已变化
+        current_fanspeed = None  # 重置风扇速度记录
+        logger.info("Switched to manual fan mode")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Enabling manual mode failed: {e}")
+        logger.error(f"Failed to switch to manual fan mode: {e}")
 
 # 获取CPU温度
 def getcputemp():
@@ -103,6 +119,19 @@ def getcputemp():
         autofan()  # 获取温度失败时切换至自动模式
         logger.error(f"Cannot get IPMI temp: {ipmierror}")
     return curtemp
+
+# 根据温度设置风扇速度
+def set_fan_speed_based_on_temp(temp):
+    if temp >= temp4:
+        setfanspeed(fanspeed4)
+    elif temp >= temp3:
+        setfanspeed(fanspeed3)
+    elif temp >= temp2:
+        setfanspeed(fanspeed2)
+    elif temp >= temp1:
+        setfanspeed(fanspeed1)
+    else:
+        setfanspeed(fanspeed0)
 
 # 信号处理函数
 def signal_handler(signal_id, frame):
@@ -126,6 +155,9 @@ if __name__ == '__main__':
 
     # 确保在开始时启用手动模式
     enable_manual_mode()
+    temp = getcputemp()
+    prevtemp = temp  # 初始化 prevtemp
+    set_fan_speed_based_on_temp(temp)  # 根据当前温度设置风扇速度
 
     while True:
         try:
@@ -134,37 +166,29 @@ if __name__ == '__main__':
             autofan()  # 获取温度失败时切换至自动模式
             logger.error(f"Cannot get IPMI temp: {ipmierror}")
 
-        if temp != prevtemp:  # 如果温度变化
+        if temp != prevtemp or fanmode_changed:
             try:
-                if temp >= returntoauto and fanmode == "static":
+                # 切换到自动模式的条件
+                if temp >= temp_threshold_auto and fanmode == "static":
                     autofan()  # 温度高于阈值时切换至自动模式
                     logger.info(f"Switching to auto mode at {temp}C")
-                elif temp < returntoauto and fanmode == "auto":
+                # 切换回手动模式的条件
+                elif temp <= temp_threshold_manual and fanmode == "auto":
                     enable_manual_mode()  # 温度低于阈值时切换回手动模式
                     logger.info(f"Returning to manual mode at {temp}C")
+                    temp = getcputemp()  # 切换模式后重新获取温度
+                    set_fan_speed_based_on_temp(temp)  # 根据当前温度设置风扇速度
 
                 if fanmode == "static":
-                    # 根据温度设置风扇速度
-                    if temp >= temp4 and prevtemp < temp4:
-                        setfanspeed(fanspeed4)
-                    elif temp >= temp3 and prevtemp < temp3:
-                        setfanspeed(fanspeed3)
-                    elif temp >= temp2 and prevtemp < temp2:
-                        setfanspeed(fanspeed2)
-                    elif temp >= temp1 and prevtemp < temp1:
-                        setfanspeed(fanspeed1)
-                    elif temp < temp1 and prevtemp >= temp1:
-                        setfanspeed(fanspeed0)
-                    elif temp < temp4 and prevtemp >= temp4:
-                        setfanspeed(fanspeed3)
-                    elif temp < temp3 and prevtemp >= temp3:
-                        setfanspeed(fanspeed2)
-                    elif temp < temp2 and prevtemp >= temp2:
-                        setfanspeed(fanspeed1)
+                    set_fan_speed_based_on_temp(temp)
             except Exception as ipmierror:
                 autofan()  # 设置风扇速度失败时切换至自动模式
                 logger.error(f"Setting fan speed failed: {ipmierror}")
+        else:
+            logger.debug(f"No temperature change or mode change: temp={temp}, prevtemp={prevtemp}")
+
         prevtemp = temp  # 更新上一次温度记录
+        fanmode_changed = False  # 重置 fanmode_changed 标志位
         time.sleep(pausetime)  # 暂停一段时间后继续执行
 
 sys.exit()
